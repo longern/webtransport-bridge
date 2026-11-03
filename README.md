@@ -13,6 +13,7 @@ Use it in front of a file server, WebDAV server, or HTTP API reachable from the 
 
 - Stream uploads and downloads without buffering entire files.
 - Forward standard HTTP headers, including Range requests and cache validators.
+- Generate and rotate short-lived certificates automatically, with private webhook delivery of pins.
 - Authenticate each request with a Bearer token.
 - Restrict requests to a fixed backend, allowed origins, methods, and path prefixes.
 - Configure request deadlines, upload limits, and concurrency limits.
@@ -20,7 +21,7 @@ Use it in front of a file server, WebDAV server, or HTTP API reachable from the 
 
 ## Quick start
 
-You need Docker Compose, a reachable HTTP backend, and a TLS certificate. The example below generates a short-lived self-signed certificate for certificate pinning.
+You need Docker Compose, a reachable HTTP backend, and an HTTPS webhook that stores certificate pins. A [Cloudflare Worker + KV receiver](examples/cloudflare/README.md) is included. The default Compose setup generates and rotates certificates automatically.
 
 ### 1. Configure the gateway
 
@@ -33,6 +34,8 @@ Create a `.env` file containing a strong random token:
 
 ```dotenv
 BRIDGE_TOKEN=replace-with-a-long-random-token
+BRIDGE_HOST=bridge.example.com
+CERT_WEBHOOK_URL=https://pins.example.com/hooks/certificates/your-random-secret
 ```
 
 Edit the arguments in [`compose.yaml`](compose.yaml):
@@ -42,8 +45,9 @@ command:
   - -backend=http://192.168.1.10:8080
   - -origins=https://app.example.com
   - -paths=/public
-  - -cert=/certs/cert.pem
-  - -key=/certs/key.pem
+  - -auto-cert
+  - -cert-host=${BRIDGE_HOST}
+  - -cert-dir=/certs
 ```
 
 | Argument | Example | Purpose |
@@ -56,36 +60,18 @@ A request for `/public/photo.jpg` is forwarded to `http://192.168.1.10:8080/publ
 
 The backend must be reachable **from inside the container**. Use its LAN address or Docker service name; `127.0.0.1` refers to the gateway container itself.
 
-### 2. Generate a certificate
+### 2. Configure the private webhook
 
-Replace `bridge.example.com` with the public hostname or IP address clients will connect to, without a scheme or port:
+Deploy the [example receiver](examples/cloudflare/README.md), generate its private URL, and put the URL in `.env` as `CERT_WEBHOOK_URL`. The URL contains a 256-bit random secret; keep it out of frontend code and source control.
 
-```sh
-docker compose pull
-mkdir -p certs
+The gateway sends an HTTPS PUT containing certificate hashes and validity dates. A successful response must confirm that the data has been stored; `202 Accepted` is not sufficient. Requests time out after 15 seconds, do not follow redirects, and retry every minute on failure. The gateway does not log the webhook URL or response body.
 
-docker run --rm --user "$(id -u):$(id -g)" \
-  -v "$PWD/certs:/certs" \
-  --entrypoint certgen \
-  ghcr.io/longern/webtransport-bridge:latest \
-  -host bridge.example.com -out /certs
-```
-
-The generator writes `cert.pem` and `key.pem` and prints the certificate's SHA-256 hash as base64. A browser client using `serverCertificateHashes` must decode that hash into 32 bytes.
-
-Certificates use ECDSA P-256 and expire after **13 days**. Certificate generation refuses to overwrite existing files. Rotation and client pin distribution must be managed separately.
-
-The gateway runs as UID `10001`. On Linux, give that user access to the certificate directory and files:
-
-```sh
-sudo chown -R 10001:10001 certs
-```
-
-You can also supply an existing certificate trusted by your clients, using the configured certificate and key paths.
+Automatic mode stores certificates and private keys in the persistent `bridge-certs` Docker volume. It does not read manual `cert.pem` / `key.pem` files. Do not share this volume between gateway instances or delete it during routine upgrades.
 
 ### 3. Start the gateway
 
 ```sh
+docker compose pull
 docker compose up -d
 docker compose logs -f
 ```
@@ -99,6 +85,32 @@ https://bridge.example.com:4433/webtransport
 Expose or forward **UDP port 4433**. A UDP tunnel must forward to the gateway's published UDP port. The browser connects directly to this endpoint, independently of where the frontend is hosted.
 
 This endpoint requires a WebTransport client. It cannot be used as a regular HTTPS file URL in an address bar, an `<img>` source, or an unmodified HTTP client.
+
+## Certificate rotation
+
+Automatic mode uses ECDSA P-256 certificates with a 13-day lifetime. When fewer than 48 hours remain, the gateway generates and persists the next certificate and publishes both pins. After the receiver confirms storage, it waits one hour before activating the next certificate for new TLS connections. Existing connections are not restarted.
+
+Failed publication prevents activation and is retried every minute. Restarting preserves both certificates, republishes their pins, and restarts the propagation delay. A long outage can still let the active certificate expire; monitor maintenance errors. The delay accommodates eventual consistency but does not guarantee global propagation.
+
+The webhook payload is:
+
+```json
+{
+  "version": 1,
+  "certificates": [
+    {
+      "algorithm": "sha-256",
+      "value": "<base64-encoded SHA-256 of the DER certificate>",
+      "notBefore": "<RFC3339 timestamp>",
+      "notAfter": "<RFC3339 timestamp>"
+    }
+  ]
+}
+```
+
+The array contains up to two entries: active and next. Private keys are never uploaded. Browser clients decode each `value` to 32 bytes for `serverCertificateHashes` and should refresh the configuration before connecting, then refresh and retry after connection failures.
+
+For externally managed certificates, omit `-auto-cert` and supply `-cert` and `-key`. The standalone `certgen` tool remains available; automatic rotation and webhook delivery apply only to automatic mode.
 
 ## Container image
 
@@ -121,6 +133,10 @@ Run `bridge -help` for the command-line reference.
 | `-origins` | Required | Comma-separated allowed HTTPS origins. |
 | `-paths` | `/` | Comma-separated allowed URL path prefixes. |
 | `-methods` | `GET,HEAD,POST,PUT` | Comma-separated allowed methods. |
+| `-auto-cert` | `false` | Enable certificate generation, rotation, and webhook publication. |
+| `-cert-host` | Required in automatic mode | Public gateway hostname or IP, without scheme or port. |
+| `-cert-dir` | `/certs` | Persistent directory for automatic certificate state. |
+| `-cert-publish-delay` | `1h` | Delay after publication before activating the next certificate; between 1m and 24h. |
 | `-cert` | `/certs/cert.pem` | TLS certificate PEM file. |
 | `-key` | `/certs/key.pem` | TLS private key PEM file. |
 | `-timeout` | `5m` | Total deadline per exchange, including file transfers. |

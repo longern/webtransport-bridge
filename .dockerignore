@@ -3,3 +3,7 @@
 certs
 bridge
 certgen
+
+**/.webhook-secret
+**/.wrangler
+**/node_modules

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/longern/webtransport-bridge/internal/bridge"
+	"github.com/longern/webtransport-bridge/internal/certmanager"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
 )
@@ -33,6 +34,10 @@ func main() {
 	maxHeaders := flag.Int("max-headers", 32<<10, "maximum HTTP header bytes")
 	maxStreams := flag.Int("max-streams", 32, "global concurrent HTTP exchanges")
 	maxSessions := flag.Int("max-sessions", 128, "maximum active sessions")
+	autoCert := flag.Bool("auto-cert", false, "automatically generate and rotate certificates; requires CERT_WEBHOOK_URL")
+	certHost := flag.String("cert-host", "", "public hostname or IP for automatic certificates")
+	certDir := flag.String("cert-dir", "/certs", "persistent directory for automatic certificate state")
+	publishDelay := flag.Duration("cert-publish-delay", time.Hour, "delay between webhook confirmation and certificate activation")
 	flag.Parse()
 	u, e := url.Parse(*backend)
 	if e != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
@@ -70,8 +75,19 @@ func main() {
 	tr.MaxResponseHeaderBytes = int64(*maxHeaders)
 	defer tr.CloseIdleConnections()
 	b := &bridge.Bridge{Backend: u, Token: token, Prefixes: strings.Split(*prefixes, ","), Methods: mm, Transport: tr, Timeout: *timeout, MaxBodyBytes: *maxBody, MaxHeaderBytes: *maxHeaders}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, NextProtos: []string{http3.NextProtoH3}}
+	if *autoCert {
+		manager, err := certmanager.New(certmanager.Options{Host: *certHost, Directory: *certDir, WebhookURL: os.Getenv("CERT_WEBHOOK_URL"), PublishDelay: *publishDelay})
+		if err != nil {
+			log.Fatal(err)
+		}
+		tlsConfig.GetCertificate = manager.GetCertificate
+		go manager.Run(ctx)
+	}
 	mux := http.NewServeMux()
-	s := &webtransport.Server{H3: &http3.Server{Addr: *addr, Handler: mux, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13}}, Config: &webtransport.Config{MaxIncomingStreams: int64(*maxStreams), MaxIncomingUniStreams: -1}, CheckOrigin: func(r *http.Request) bool { return allowed[r.Header.Get("Origin")] }}
+	s := &webtransport.Server{H3: &http3.Server{Addr: *addr, Handler: mux, TLSConfig: tlsConfig}, Config: &webtransport.Config{MaxIncomingStreams: int64(*maxStreams), MaxIncomingUniStreams: -1}, CheckOrigin: func(r *http.Request) bool { return allowed[r.Header.Get("Origin")] }}
 	slots := make(chan struct{}, *maxStreams)
 	sessions := make(chan struct{}, *maxSessions)
 	mux.HandleFunc("/webtransport", func(w http.ResponseWriter, r *http.Request) {
@@ -113,11 +129,15 @@ func main() {
 			}
 		}
 	})
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go func() { <-ctx.Done(); _ = s.Close() }()
 	fmt.Printf("WebTransport HTTP bridge listening on UDP %s\n", *addr)
-	if err := s.ListenAndServeTLS(*cert, *key); err != nil && ctx.Err() == nil {
-		log.Fatal(err)
+	var serveErr error
+	if *autoCert {
+		serveErr = s.ListenAndServe()
+	} else {
+		serveErr = s.ListenAndServeTLS(*cert, *key)
+	}
+	if serveErr != nil && ctx.Err() == nil {
+		log.Fatal(serveErr)
 	}
 }
