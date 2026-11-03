@@ -1,0 +1,20 @@
+services:
+  bridge:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "4433:4433/udp"
+    environment:
+      BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN in .env}
+    volumes:
+      - ./certs:/certs:ro
+    command:
+      - -backend=http://192.168.1.10:8080
+      - -origins=https://your-site.workers.dev
+      - -paths=/public
+      - -cert=/certs/cert.pem
+      - -key=/certs/key.pem
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    cap_drop: [ALL]
