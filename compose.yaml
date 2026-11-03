@@ -1,6 +1,6 @@
 services:
   bridge:
-    build: .
+    image: ghcr.io/longern/webtransport-bridge:latest
     restart: unless-stopped
     ports:
       - "4433:4433/udp"

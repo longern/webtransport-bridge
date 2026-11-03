@@ -4,19 +4,21 @@
 
 ## Docker 部署
 
-需要 Docker Compose。修改 `compose.yaml`：
+镜像地址：`ghcr.io/longern/webtransport-bridge:latest`，支持 linux/amd64 和 linux/arm64，由 GitHub Actions 测试通过后自动构建推送。
+
+需要 Docker Compose。下载本仓库的 `compose.yaml`，然后修改：
 
 - `-backend`：Docker 内可达的固定 HTTP(S) 后端 origin，例如 NAS 上的 Caddy、WebDAV 或 API。不能带路径。
 - `-origins`：允许发起连接的网页来源，完整匹配，可逗号分隔，不带末尾 `/`。
 - `-paths`：允许访问的路径前缀，按路径段匹配。例如 `/public` 允许 `/public/a`，不允许 `/publicity`。
 
 ```sh
-docker compose build
+docker compose pull
 mkdir -p certs
 # 宿主机运行生成器，避免容器 UID 对挂载目录的权限问题。
 docker run --rm --user "$(id -u):$(id -g)" \
   -v "$PWD/certs:/certs" --entrypoint certgen \
-  "$(docker compose images -q bridge)" -host your-tunnel-host.example -out /certs
+  ghcr.io/longern/webtransport-bridge:latest -host your-tunnel-host.example -out /certs
 ```
 
 生成器输出证书 SHA-256 指纹的 base64 表示，后续浏览器客户端需要将其解码为 32 字节 `serverCertificateHashes`。证书使用 ECDSA P-256，有效期 13 天。证书与私钥文件默认权限 0600；需让容器 UID 10001 能读取它们，例如：
@@ -55,7 +57,9 @@ go vet ./...
 go run ./cmd/bridge -help
 ```
 
-`webtransport-go` 固定为 v0.13.0。初次联网构建执行 `go mod tidy` 生成完整依赖清单和 `go.sum`；应将生成的文件一并提交。目前开发环境无法访问 Go module proxy，尚未生成依赖校验文件，完整网关构建及浏览器连通性尚未验证。
+`webtransport-go` 固定为 v0.13.0。源码构建前执行 `go mod tidy` 生成完整依赖清单和 `go.sum`。镜像发布前运行完整静态检查和 Go 测试；真实浏览器连通性尚未验证。
+
+如需自己构建镜像，可运行 `docker build -t webtransport-bridge:local .`。首次发布的 GHCR 包默认可能为私有，若匿名拉取被拒绝，仓库所有者需到 GitHub Packages 的包设置将可见性改为 Public，或在 NAS 配置仓库登录。
 
 ## 协议约束
 
