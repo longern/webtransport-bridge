@@ -139,3 +139,46 @@ func TestWebhookNeverFollowsRedirects(t *testing.T) {
 		t.Fatal("redirect followed")
 	}
 }
+
+func TestHostIsOptionalAndExistingCertificatesAreReused(t *testing.T) {
+	options := Options{Directory: t.TempDir(), WebhookURL: "https://example.com/private-secret", PublishDelay: time.Hour}
+	m, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, _ := m.GetCertificate(nil)
+	if err := cert.Leaf.VerifyHostname(DefaultHost); err != nil {
+		t.Fatal(err)
+	}
+	savedPin := pin(cert).Value
+	reloaded, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, _ = reloaded.GetCertificate(nil)
+	if pin(cert).Value != savedPin {
+		t.Fatal("default-host restart changed certificate")
+	}
+
+	options.Directory = t.TempDir()
+	options.Host = "previously-configured.example"
+	m, err = New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, _ = m.GetCertificate(nil)
+	savedPin = pin(cert).Value
+	options.Host = ""
+	reloaded, err = New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, _ = reloaded.GetCertificate(nil)
+	if pin(cert).Value != savedPin {
+		t.Fatal("removing host configuration changed certificate")
+	}
+	options.Host = "different.example"
+	if _, err = New(options); err == nil {
+		t.Fatal("explicit hostname mismatch accepted")
+	}
+}

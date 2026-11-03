@@ -28,6 +28,9 @@ import (
 	"time"
 )
 
+// DefaultHost is a certificate label for clients authenticating with certificate hashes.
+const DefaultHost = "webtransport-bridge.invalid"
+
 const lifetime = 13 * 24 * time.Hour
 const renewBefore = 48 * time.Hour
 
@@ -59,12 +62,16 @@ type Manager struct {
 }
 
 func New(o Options) (*Manager, error) {
+	explicitHost := o.Host != ""
+	if !explicitHost {
+		o.Host = DefaultHost
+	}
 	u, err := url.Parse(o.WebhookURL)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
 		return nil, errors.New("certificate webhook must be an HTTPS URL without user info or fragment")
 	}
-	if o.Host == "" || o.Directory == "" || o.PublishDelay < time.Minute || o.PublishDelay > 24*time.Hour {
-		return nil, errors.New("certificate host, directory and publish delay between 1m and 24h are required")
+	if o.Directory == "" || o.PublishDelay < time.Minute || o.PublishDelay > 24*time.Hour {
+		return nil, errors.New("certificate directory and publish delay between 1m and 24h are required")
 	}
 	if err := os.MkdirAll(o.Directory, 0700); err != nil {
 		return nil, err
@@ -96,8 +103,10 @@ func New(o Options) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = cert.Leaf.VerifyHostname(o.Host); err != nil {
-		return nil, errors.New("stored certificate does not match -cert-host; use a separate certificate directory")
+	if explicitHost {
+		if err = cert.Leaf.VerifyHostname(o.Host); err != nil {
+			return nil, errors.New("stored certificate does not match -cert-host; use a separate certificate directory")
+		}
 	}
 	if m.state.Next != "" {
 		if _, err = parse(m.state.Next); err != nil {

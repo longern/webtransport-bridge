@@ -34,7 +34,6 @@ Create a `.env` file containing a strong random token:
 
 ```dotenv
 BRIDGE_TOKEN=replace-with-a-long-random-token
-BRIDGE_HOST=bridge.example.com
 CERT_WEBHOOK_URL=https://pins.example.com/hooks/certificates/your-random-secret
 ```
 
@@ -46,7 +45,6 @@ command:
   - -origins=https://app.example.com
   - -paths=/public
   - -auto-cert
-  - -cert-host=${BRIDGE_HOST}
   - -cert-dir=/certs
 ```
 
@@ -88,7 +86,7 @@ This endpoint requires a WebTransport client. It cannot be used as a regular HTT
 
 ## Certificate rotation
 
-Automatic mode uses ECDSA P-256 certificates with a 13-day lifetime. When fewer than 48 hours remain, the gateway generates and persists the next certificate and publishes both pins. After the receiver confirms storage, it waits one hour before activating the next certificate for new TLS connections. Existing connections are not restarted.
+Automatic mode uses ECDSA P-256 certificates with a 13-day lifetime. No public hostname is required when clients authenticate using `serverCertificateHashes`: new certificates use the label `webtransport-bridge.invalid`. To override it, optionally set `BRIDGE_HOST` in Compose or pass `-cert-host`. Omitting the setting preserves certificates already stored in the persistent volume; it does not regenerate their keys or change their pins. When fewer than 48 hours remain, the gateway generates and persists the next certificate and publishes both pins. After the receiver confirms storage, it waits one hour before activating the next certificate for new TLS connections. Existing connections are not restarted.
 
 Failed publication prevents activation and is retried every minute. Restarting preserves both certificates, republishes their pins, and restarts the propagation delay. A long outage can still let the active certificate expire; monitor maintenance errors. The delay accommodates eventual consistency but does not guarantee global propagation.
 
@@ -134,7 +132,7 @@ Run `bridge -help` for the command-line reference.
 | `-paths` | `/` | Comma-separated allowed URL path prefixes. |
 | `-methods` | `GET,HEAD,POST,PUT` | Comma-separated allowed methods. |
 | `-auto-cert` | `false` | Enable certificate generation, rotation, and webhook publication. |
-| `-cert-host` | Required in automatic mode | Public gateway hostname or IP, without scheme or port. |
+| `-cert-host` | `webtransport-bridge.invalid` for new certificates | Optional certificate hostname or IP; existing certificates are reused when omitted. |
 | `-cert-dir` | `/certs` | Persistent directory for automatic certificate state. |
 | `-cert-publish-delay` | `1h` | Delay after publication before activating the next certificate; between 1m and 24h. |
 | `-cert` | `/certs/cert.pem` | TLS certificate PEM file. |

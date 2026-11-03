@@ -14,7 +14,7 @@ services:
       - -origins=https://your-site.workers.dev
       - -paths=/public
       - -auto-cert
-      - -cert-host=${BRIDGE_HOST:?Set the public gateway hostname or IP in .env}
+      - -cert-host=${BRIDGE_HOST:-}
       - -cert-dir=/certs
     security_opt:
       - no-new-privileges:true

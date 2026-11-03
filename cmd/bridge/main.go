@@ -35,7 +35,7 @@ func main() {
 	maxStreams := flag.Int("max-streams", 32, "global concurrent HTTP exchanges")
 	maxSessions := flag.Int("max-sessions", 128, "maximum active sessions")
 	autoCert := flag.Bool("auto-cert", false, "automatically generate and rotate certificates; requires CERT_WEBHOOK_URL")
-	certHost := flag.String("cert-host", "", "public hostname or IP for automatic certificates")
+	certHost := flag.String("cert-host", "", "optional hostname or IP for automatic certificates (default label: webtransport-bridge.invalid)")
 	certDir := flag.String("cert-dir", "/certs", "persistent directory for automatic certificate state")
 	publishDelay := flag.Duration("cert-publish-delay", time.Hour, "delay between webhook confirmation and certificate activation")
 	flag.Parse()
