@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const requestHeaders = "GET /public/events HTTP/1.1\r\nHost: nas\r\nAuthorization: Bearer secret\r\n\r\n"
+const requestHeaders = "GET /public/events HTTP/1.1\r\nHost: nas\r\nProxy-Authorization: Bearer secret\r\n\r\n"
 
 func streamExchange(t *testing.T, b *Bridge, ctx context.Context) (net.Conn, <-chan error) {
 	t.Helper()
@@ -103,7 +103,7 @@ func TestActiveUploadCanOutliveIdleWindow(t *testing.T) {
 		return &http.Response{StatusCode: 204, Header: make(http.Header), Body: http.NoBody}, nil
 	})
 	client, result := streamExchange(t, b, context.Background())
-	headers := "PUT /public/a HTTP/1.1\r\nHost: nas\r\nAuthorization: Bearer secret\r\nContent-Length: 7\r\n\r\n"
+	headers := "PUT /public/a HTTP/1.1\r\nHost: nas\r\nProxy-Authorization: Bearer secret\r\nContent-Length: 7\r\n\r\n"
 	if _, err := io.WriteString(client, headers); err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestIdleTimeoutUnblocksUploadAndResponseBody(t *testing.T) {
 			client, result := streamExchange(t, b, context.Background())
 			raw := requestHeaders
 			if upload {
-				raw = "PUT /public/a HTTP/1.1\r\nHost: nas\r\nAuthorization: Bearer secret\r\nContent-Length: 8\r\n\r\n12"
+				raw = "PUT /public/a HTTP/1.1\r\nHost: nas\r\nProxy-Authorization: Bearer secret\r\nContent-Length: 8\r\n\r\n12"
 			}
 			if _, err := io.WriteString(client, raw); err != nil {
 				t.Fatal(err)

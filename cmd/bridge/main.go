@@ -29,7 +29,7 @@ func main() {
 	origins := flag.String("origins", "", "comma separated exact HTTPS page origins")
 	prefixes := flag.String("paths", "/", "comma separated permitted path prefixes")
 	methods := flag.String("methods", "GET,HEAD,POST,PUT", "permitted methods; add WebDAV methods explicitly")
-	public := flag.Bool("public", false, "explicitly allow requests without a Bearer token")
+	public := flag.Bool("public", false, "disable gateway token checks and delegate authentication to the backend")
 	timeout := flag.Duration("timeout", 0, "optional total exchange deadline; 0 disables it")
 	idleTimeout := flag.Duration("idle-timeout", time.Minute, "exchange timeout without request or response byte progress")
 	headerTimeout := flag.Duration("header-timeout", 15*time.Second, "absolute deadline for receiving request headers")
@@ -49,9 +49,9 @@ func main() {
 	if e != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		log.Fatal("-backend must be an HTTP(S) origin without credentials, path or query")
 	}
-	token := os.Getenv("BRIDGE_TOKEN")
-	if token == "" && !*public {
-		log.Fatal("set BRIDGE_TOKEN or explicitly use -public")
+	token, err := configuredToken(os.Getenv("BRIDGE_TOKEN"), *public)
+	if err != nil {
+		log.Fatal(err)
 	}
 	if *origins == "" || *timeout < 0 || *idleTimeout <= 0 || *headerTimeout <= 0 || *responseHeaderTimeout <= 0 || *keepAlive < 0 || *connectionIdle <= 0 || *maxBody < 0 || *maxHeaders < 1024 || *maxStreams < 1 || *maxSessions < 1 {
 		log.Fatal("origins and positive limits are required")
@@ -146,4 +146,16 @@ func main() {
 	if serveErr != nil && ctx.Err() == nil {
 		log.Fatal(serveErr)
 	}
+}
+
+// Public mode explicitly delegates authentication, even if an old token remains
+// in the environment. Without that explicit choice, missing credentials fail closed.
+func configuredToken(token string, public bool) (string, error) {
+	if public {
+		return "", nil
+	}
+	if token == "" {
+		return "", fmt.Errorf("set BRIDGE_TOKEN or explicitly use --public to delegate authentication to the backend")
+	}
+	return token, nil
 }

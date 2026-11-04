@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 	"time"
 )
@@ -91,11 +92,16 @@ func (b *Bridge) allowed(p string) bool {
 	}
 	return false
 }
-func reply(w io.Writer, code int, head bool) error {
+func reply(w io.Writer, code int, head bool, extra ...http.Header) error {
 	text := http.StatusText(code) + "\n"
 	h := http.Header{"Content-Type": []string{"text/plain; charset=utf-8"}}
-	if code == 401 {
-		h.Set("WWW-Authenticate", `Bearer realm="webtransport-bridge"`)
+	for _, headers := range extra {
+		for name, values := range headers {
+			h[name] = values
+		}
+	}
+	if code == http.StatusProxyAuthRequired {
+		h.Set("Proxy-Authenticate", `Bearer realm="webtransport-bridge"`)
 	}
 	r := &http.Response{StatusCode: code, ProtoMajor: 1, ProtoMinor: 1, Header: h, Body: io.NopCloser(strings.NewReader(text)), ContentLength: int64(len(text)), Close: true}
 	if head {
@@ -134,11 +140,25 @@ func (b *Bridge) Handle(ctx context.Context, s Stream) error {
 	if req.ProtoMajor != 1 || req.ProtoMinor != 1 || !strings.HasPrefix(req.RequestURI, "/") || strings.HasPrefix(req.RequestURI, "//") || req.URL.IsAbs() {
 		return reply(watch, 400, head)
 	}
-	if b.Token != "" && subtle.ConstantTimeCompare([]byte(req.Header.Get("Authorization")), []byte("Bearer "+b.Token)) != 1 {
-		return reply(watch, 401, head)
+	if b.Token != "" {
+		credentials := req.Header.Values("Proxy-Authorization")
+		if len(credentials) != 1 {
+			return reply(watch, http.StatusProxyAuthRequired, head)
+		}
+		scheme, token, ok := strings.Cut(credentials[0], " ")
+		if !ok || !strings.EqualFold(scheme, "Bearer") || subtle.ConstantTimeCompare([]byte(strings.TrimLeft(token, " ")), []byte(b.Token)) != 1 {
+			return reply(watch, http.StatusProxyAuthRequired, head)
+		}
 	}
 	if !b.Methods[req.Method] {
-		return reply(watch, 405, head)
+		methods := make([]string, 0, len(b.Methods))
+		for method, enabled := range b.Methods {
+			if enabled {
+				methods = append(methods, method)
+			}
+		}
+		sort.Strings(methods)
+		return reply(watch, http.StatusMethodNotAllowed, head, http.Header{"Allow": []string{strings.Join(methods, ", ")}})
 	}
 	// Multiple decoding by an upstream must not allow escaping the path scope.
 	if strings.Contains(req.URL.Path, "%") || !b.allowed(req.URL.Path) {
@@ -159,7 +179,8 @@ func (b *Bridge) Handle(ctx context.Context, s Stream) error {
 	req.URL.Scheme = b.Backend.Scheme
 	req.URL.Host = b.Backend.Host
 	req.Host = b.Backend.Host
-	req.Header.Del("Authorization")
+	// Consume only the gateway credential; backend Authorization and Cookie stay intact.
+	req.Header.Del("Proxy-Authorization")
 	strip(req.Header)
 	// Avoid transparent decompression so Content-Encoding and bytes stay consistent.
 	if req.Header.Get("Accept-Encoding") == "" {

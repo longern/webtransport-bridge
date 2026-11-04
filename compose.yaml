@@ -5,17 +5,18 @@ services:
     ports:
       - "4433:4433/udp"
     environment:
-      BRIDGE_TOKEN: ${BRIDGE_TOKEN:?Set BRIDGE_TOKEN in .env}
+      BRIDGE_TOKEN: ${BRIDGE_TOKEN:-}
       CERT_WEBHOOK_URL: ${CERT_WEBHOOK_URL:?Set the private HTTPS webhook URL in .env}
     volumes:
       - bridge-certs:/certs
     command:
-      - -backend=http://192.168.1.10:8080
-      - -origins=https://your-site.workers.dev
-      - -paths=/public
-      - -auto-cert
-      - -cert-host=${BRIDGE_HOST:-}
-      - -cert-dir=/certs
+      - --public=${BRIDGE_PUBLIC:-false}
+      - --backend=http://192.168.1.10:8080
+      - --origins=https://your-site.workers.dev
+      - --paths=/public
+      - --auto-cert
+      - --cert-host=${BRIDGE_HOST:-}
+      - --cert-dir=/certs
     security_opt:
       - no-new-privileges:true
     read_only: true

@@ -14,7 +14,7 @@ Use it in front of a file server, WebDAV server, or HTTP API reachable from the 
 - Stream uploads and downloads without buffering entire files.
 - Forward standard HTTP headers, including Range requests and cache validators.
 - Generate and rotate short-lived certificates automatically, with private webhook delivery of pins.
-- Authenticate each request with a Bearer token.
+- Optionally authenticate access to the gateway using standard proxy authentication while preserving backend credentials.
 - Restrict requests to a fixed backend, allowed origins, methods, and path prefixes.
 - Configure request deadlines, upload limits, and concurrency limits.
 - Deploy using Docker images for `linux/amd64` and `linux/arm64`.
@@ -30,10 +30,13 @@ git clone https://github.com/longern/webtransport-bridge.git
 cd webtransport-bridge
 ```
 
-Create a `.env` file containing a strong random token:
+Create a `.env` file. Choose gateway authentication or delegate authentication to your backend:
 
 ```dotenv
+# Gateway authentication (default):
 BRIDGE_TOKEN=replace-with-a-long-random-token
+# For a backend that already authenticates requests, set BRIDGE_PUBLIC=true
+# and omit BRIDGE_TOKEN.
 CERT_WEBHOOK_URL=https://pins.example.com/hooks/certificates/your-random-secret
 ```
 
@@ -41,18 +44,19 @@ Edit the arguments in [`compose.yaml`](compose.yaml):
 
 ```yaml
 command:
-  - -backend=http://192.168.1.10:8080
-  - -origins=https://app.example.com
-  - -paths=/public
-  - -auto-cert
-  - -cert-dir=/certs
+  - --public=${BRIDGE_PUBLIC:-false}
+  - --backend=http://192.168.1.10:8080
+  - --origins=https://app.example.com
+  - --paths=/public
+  - --auto-cert
+  - --cert-dir=/certs
 ```
 
 | Argument | Example | Purpose |
 | --- | --- | --- |
-| `-backend` | `http://192.168.1.10:8080` | Fixed HTTP(S) backend origin, without credentials, path, query, or fragment. |
-| `-origins` | `https://app.example.com` | Comma-separated exact HTTPS page origins, without trailing slashes. |
-| `-paths` | `/public` | Comma-separated allowed path prefixes, matched at path-segment boundaries. |
+| `--backend` | `http://192.168.1.10:8080` | Fixed HTTP(S) backend origin, without credentials, path, query, or fragment. |
+| `--origins` | `https://app.example.com` | Comma-separated exact HTTPS page origins, without trailing slashes. |
+| `--paths` | `/public` | Comma-separated allowed path prefixes, matched at path-segment boundaries. |
 
 A request for `/public/photo.jpg` is forwarded to `http://192.168.1.10:8080/public/photo.jpg`. Paths are preserved; `/public` is a URL prefix, not a filesystem mount.
 
@@ -86,7 +90,7 @@ This endpoint requires a WebTransport client. It cannot be used as a regular HTT
 
 ## Certificate rotation
 
-Automatic mode uses ECDSA P-256 certificates with a 14-day validity period (the WebTransport certificate-hash limit, measured from NotBefore to NotAfter). The validity start is backdated by one minute for clock skew; the expiry is calculated from that start, so the total period does not exceed 14 days. No public hostname is required when clients authenticate using `serverCertificateHashes`: new certificates use the label `webtransport-bridge.invalid`. To override it, optionally set `BRIDGE_HOST` in Compose or pass `-cert-host`. Omitting the setting preserves certificates already stored in the persistent volume; it does not regenerate their keys or change their pins. When fewer than 48 hours remain, the gateway generates and persists the next certificate and publishes both pins. After the receiver confirms storage, it waits one hour before activating the next certificate for new TLS connections. Existing connections are not restarted.
+Automatic mode uses ECDSA P-256 certificates with a 14-day validity period (the WebTransport certificate-hash limit, measured from NotBefore to NotAfter). The validity start is backdated by one minute for clock skew; the expiry is calculated from that start, so the total period does not exceed 14 days. No public hostname is required when clients authenticate using `serverCertificateHashes`: new certificates use the label `webtransport-bridge.invalid`. To override it, optionally set `BRIDGE_HOST` in Compose or pass `--cert-host`. Omitting the setting preserves certificates already stored in the persistent volume; it does not regenerate their keys or change their pins. When fewer than 48 hours remain, the gateway generates and persists the next certificate and publishes both pins. After the receiver confirms storage, it waits one hour before activating the next certificate for new TLS connections. Existing connections are not restarted.
 
 Failed publication prevents activation and is retried every minute. Restarting preserves both certificates, republishes their pins, and restarts the propagation delay. A long outage can still let the active certificate expire; monitor maintenance errors. The delay accommodates eventual consistency but does not guarantee global propagation.
 
@@ -108,7 +112,7 @@ The webhook payload is:
 
 The array contains up to two entries: active and next. Private keys are never uploaded. Browser clients decode each `value` to 32 bytes for `serverCertificateHashes` and should refresh the configuration before connecting, then refresh and retry after connection failures.
 
-For externally managed certificates, omit `-auto-cert` and supply `-cert` and `-key`. The standalone `certgen` tool remains available; automatic rotation and webhook delivery apply only to automatic mode.
+For externally managed certificates, omit `--auto-cert` and supply `--cert` and `--key`. The standalone `certgen` tool remains available; automatic rotation and webhook delivery apply only to automatic mode.
 
 ## Container image
 
@@ -122,34 +126,47 @@ If pulling returns `denied`, check the [package visibility](https://github.com/u
 
 ## Configuration
 
-Run `bridge -help` for the command-line reference.
+Run `bridge --help` for the command-line reference.
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `-listen` | `:4433` | UDP listen address. |
-| `-backend` | Required | Fixed HTTP(S) backend origin. |
-| `-origins` | Required | Comma-separated allowed HTTPS origins. |
-| `-paths` | `/` | Comma-separated allowed URL path prefixes. |
-| `-methods` | `GET,HEAD,POST,PUT` | Comma-separated allowed methods. |
-| `-auto-cert` | `false` | Enable certificate generation, rotation, and webhook publication. |
-| `-cert-host` | `webtransport-bridge.invalid` for new certificates | Optional certificate hostname or IP; existing certificates are reused when omitted. |
-| `-cert-dir` | `/certs` | Persistent directory for automatic certificate state. |
-| `-cert-publish-delay` | `1h` | Delay after publication before activating the next certificate; between 1m and 24h. |
-| `-cert` | `/certs/cert.pem` | TLS certificate PEM file. |
-| `-key` | `/certs/key.pem` | TLS private key PEM file. |
-| `-timeout` | `0` | Optional total exchange deadline; `0` disables it. Explicit values from older configurations still apply. |
-| `-idle-timeout` | `1m` | Maximum time without successful request or response byte progress on a stream. |
-| `-header-timeout` | `15s` | Absolute deadline for receiving the complete client request headers. |
-| `-response-header-timeout` | `30s` | Backend response header deadline after the request upload completes. |
-| `-keepalive` | `15s` | QUIC keepalive interval; `0` disables it. |
-| `-connection-idle-timeout` | `1m` | QUIC connection idle timeout, negotiated with the peer. |
-| `-max-headers` | `32768` | Maximum request or backend response header size in bytes. |
-| `-max-body` | `1073741824` | Maximum upload size in bytes; does not limit downloads. |
-| `-max-streams` | `32` | Maximum active HTTP exchanges across all sessions. |
-| `-max-sessions` | `128` | Maximum active WebTransport sessions. |
-| `-public` | `false` | Allow requests without a Bearer token. |
+| `--listen` | `:4433` | UDP listen address. |
+| `--backend` | Required | Fixed HTTP(S) backend origin. |
+| `--origins` | Required | Comma-separated allowed HTTPS origins. |
+| `--paths` | `/` | Comma-separated allowed URL path prefixes. |
+| `--methods` | `GET,HEAD,POST,PUT` | Comma-separated allowed methods. |
+| `--auto-cert` | `false` | Enable certificate generation, rotation, and webhook publication. |
+| `--cert-host` | `webtransport-bridge.invalid` for new certificates | Optional certificate hostname or IP; existing certificates are reused when omitted. |
+| `--cert-dir` | `/certs` | Persistent directory for automatic certificate state. |
+| `--cert-publish-delay` | `1h` | Delay after publication before activating the next certificate; between 1m and 24h. |
+| `--cert` | `/certs/cert.pem` | TLS certificate PEM file. |
+| `--key` | `/certs/key.pem` | TLS private key PEM file. |
+| `--timeout` | `0` | Optional total exchange deadline; `0` disables it. Explicit values from older configurations still apply. |
+| `--idle-timeout` | `1m` | Maximum time without successful request or response byte progress on a stream. |
+| `--header-timeout` | `15s` | Absolute deadline for receiving the complete client request headers. |
+| `--response-header-timeout` | `30s` | Backend response header deadline after the request upload completes. |
+| `--keepalive` | `15s` | QUIC keepalive interval; `0` disables it. |
+| `--connection-idle-timeout` | `1m` | QUIC connection idle timeout, negotiated with the peer. |
+| `--max-headers` | `32768` | Maximum request or backend response header size in bytes. |
+| `--max-body` | `1073741824` | Maximum upload size in bytes; does not limit downloads. |
+| `--max-streams` | `32` | Maximum active HTTP exchanges across all sessions. |
+| `--max-sessions` | `128` | Maximum active WebTransport sessions. |
+| `--public` | `false` | Disable gateway token checks and delegate authentication to the backend; any BRIDGE_TOKEN value is ignored. |
 
-Set `BRIDGE_TOKEN` in the environment unless `-public` is enabled. The token belongs in each tunneled HTTP request, not the WebTransport endpoint URL. It is removed before forwarding, so the backend's `Authorization` header cannot be used for separate credentials through this interface.
+### Authentication
+
+`Authorization` and `Cookie` belong to the backend and are forwarded in both modes. Backend `401` responses, `WWW-Authenticate` challenges, and `Set-Cookie` headers are passed back to the client. A WebTransport client must supply backend credentials and handle cookies explicitly: the browser does not apply ordinary Fetch cookie-jar behavior to the inner HTTP messages. The gateway does not translate or manage the backend login flow.
+
+| Mode | Configuration | Client credentials |
+| --- | --- | --- |
+| Backend authentication only | `BRIDGE_PUBLIC=true` in Compose, or `--public` on the command line | Backend `Authorization` and/or `Cookie`; no gateway token required. |
+| Gateway authentication, optionally combined with backend authentication | Set `BRIDGE_TOKEN` and leave `BRIDGE_PUBLIC=false` | `Proxy-Authorization: Bearer <BRIDGE_TOKEN>` plus any backend credentials. |
+
+`--public` explicitly disables gateway authentication even if a stale `BRIDGE_TOKEN` remains in the environment. Without `--public`, an unset or empty token prevents startup. Disabling gateway authentication does not make a protected backend public; the backend continues to enforce its own rules.
+
+The gateway consumes `Proxy-Authorization` and never forwards it, including in public mode. Missing, invalid, or duplicate proxy credentials in protected mode produce `407 Proxy Authentication Required` with `Proxy-Authenticate: Bearer realm="webtransport-bridge"`. A backend authentication failure remains a backend `401`, so clients can distinguish the two layers.
+
+**Migration:** Older versions used `Authorization: Bearer <BRIDGE_TOKEN>` and removed the backend credential. That behavior is no longer supported. Move the gateway token to `Proxy-Authorization`, or enable `BRIDGE_PUBLIC=true` to use only backend authentication. These headers are carried inside the WebTransport stream, not on its browser handshake. Browser Fetch APIs restrict `Proxy-*` headers; a custom WebTransport client should inject proxy credentials while serializing the inner HTTP request, rather than relying on a browser `Request` to preserve them. Keep the gateway token separate from the private certificate webhook URL.
 
 For public file access, use a dedicated read-only backend and restrict methods to `GET,HEAD`.
 
@@ -164,11 +181,11 @@ Responses are serialized directly to the stream without an additional buffered w
 For example, append these arguments to Compose's `command` for uploads up to 100 GiB and up to five minutes between application bytes:
 
 ```yaml
-  - -idle-timeout=5m
-  - -max-body=107374182400
+  - --idle-timeout=5m
+  - --max-body=107374182400
 ```
 
-If an existing deployment explicitly sets `-timeout=5m`, remove it or set `-timeout=0` to allow longer transfers. Backend reverse proxies and servers may impose additional limits. WebSocket and HTTP Upgrade forwarding remain unsupported.
+If an existing deployment explicitly sets `--timeout=5m`, remove it or set `--timeout=0` to allow longer transfers. Backend reverse proxies and servers may impose additional limits. WebSocket and HTTP Upgrade forwarding remain unsupported.
 
 ## Wire protocol
 
@@ -177,7 +194,8 @@ Open a session at `/webtransport`, then create a bidirectional stream for each H
 ```http
 GET /public/photo.jpg HTTP/1.1
 Host: nas.internal
-Authorization: Bearer your-token
+Proxy-Authorization: Bearer your-gateway-token
+Authorization: Bearer your-backend-token
 Range: bytes=0-65535
 
 ```
@@ -195,7 +213,7 @@ The gateway parses requests with Go's `http.ReadRequest`, forwards them using `h
 Additional WebDAV methods can be enabled explicitly, for example:
 
 ```text
--methods GET,HEAD,PUT,POST,DELETE,OPTIONS,PROPFIND,MKCOL,COPY,MOVE,LOCK,UNLOCK
+--methods GET,HEAD,PUT,POST,DELETE,OPTIONS,PROPFIND,MKCOL,COPY,MOVE,LOCK,UNLOCK
 ```
 
 ### Errors and limits
@@ -203,9 +221,9 @@ Additional WebDAV methods can be enabled explicitly, for example:
 | HTTP status | Meaning |
 | --- | --- |
 | `400` | Invalid request or request headers exceeding the limit. |
-| `401` | Missing or invalid Bearer token. |
+| `407` | Missing, invalid, or duplicate gateway proxy credentials. Backend `401` responses are passed through. |
 | `403` | Disallowed or ambiguous path. |
-| `405` | Method not enabled. |
+| `405` | Method not enabled; the `Allow` header lists enabled methods. |
 | `413` | Request body exceeds the upload limit. |
 | `417` | Unsupported Expect or Upgrade header. |
 | `502` | Backend exchange failed or returned a protocol upgrade. |
@@ -223,14 +241,14 @@ Requires Go 1.26 or later.
 
 ```sh
 go mod tidy
-go run ./cmd/certgen -host localhost -out certs
+go run ./cmd/certgen --host localhost --out certs
 export BRIDGE_TOKEN='replace-with-a-long-random-token'
 
 go run ./cmd/bridge \
-  -backend http://127.0.0.1:8080 \
-  -origins https://app.example.com \
-  -paths /public \
-  -cert certs/cert.pem -key certs/key.pem
+  --backend http://127.0.0.1:8080 \
+  --origins https://app.example.com \
+  --paths /public \
+  --cert certs/cert.pem --key certs/key.pem
 ```
 
 Run checks:
@@ -248,6 +266,8 @@ docker build -t webtransport-bridge:local .
 ```
 
 ## References
+
+- [HTTP semantics and proxy authentication — RFC 9110](https://www.rfc-editor.org/rfc/rfc9110)
 
 - [HTTP/1.1 message syntax and framing — RFC 9112](https://www.rfc-editor.org/rfc/rfc9112)
 - [webtransport-go](https://github.com/quic-go/webtransport-go)
