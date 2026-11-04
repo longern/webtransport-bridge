@@ -11,8 +11,8 @@ services:
       - bridge-certs:/certs
     command:
       - --public=${BRIDGE_PUBLIC:-false}
-      - --backend=http://192.168.1.10:8080
-      - --origins=https://your-site.workers.dev
+      - --backend=http://backend.example.com:8080
+      - --origins=https://app.example.com
       - --paths=/public
       - --auto-cert
       - --cert-host=${BRIDGE_HOST:-}

@@ -5,7 +5,7 @@
 
 Expose an existing HTTP service over WebTransport. Each bidirectional stream carries one HTTP/1.1 request and response, with concurrent requests sharing a WebTransport session.
 
-Use it in front of a file server, WebDAV server, or HTTP API reachable from the gateway. The backend remains responsible for serving files and implementing application behavior.
+Use it with HTTP APIs, application servers, file servers, or other HTTP backends reachable from the gateway. The backend remains responsible for authentication and application behavior.
 
 > **Experimental:** This project defines its own per-stream mapping of HTTP/1.1 messages onto WebTransport. It is not a standardized HTTP transport. A browser client library is not included, and browser interoperability has not yet been verified.
 
@@ -45,7 +45,7 @@ Edit the arguments in [`compose.yaml`](compose.yaml):
 ```yaml
 command:
   - --public=${BRIDGE_PUBLIC:-false}
-  - --backend=http://192.168.1.10:8080
+  - --backend=http://backend.example.com:8080
   - --origins=https://app.example.com
   - --paths=/public
   - --auto-cert
@@ -54,13 +54,13 @@ command:
 
 | Argument | Example | Purpose |
 | --- | --- | --- |
-| `--backend` | `http://192.168.1.10:8080` | Fixed HTTP(S) backend origin, without credentials, path, query, or fragment. |
+| `--backend` | `http://backend.example.com:8080` | Fixed HTTP(S) backend origin, without credentials, path, query, or fragment. |
 | `--origins` | `https://app.example.com` | Comma-separated exact HTTPS page origins, without trailing slashes. |
 | `--paths` | `/public` | Comma-separated allowed path prefixes, matched at path-segment boundaries. |
 
-A request for `/public/photo.jpg` is forwarded to `http://192.168.1.10:8080/public/photo.jpg`. Paths are preserved; `/public` is a URL prefix, not a filesystem mount.
+A request for `/public/photo.jpg` is forwarded to `http://backend.example.com:8080/public/photo.jpg`. Paths are preserved; `/public` is a URL prefix, not a filesystem mount.
 
-The backend must be reachable **from inside the container**. Use its LAN address or Docker service name; `127.0.0.1` refers to the gateway container itself.
+The backend must be reachable **from inside the container**. Use a reachable address or a service name on a shared Docker network; `127.0.0.1` refers to the gateway container itself.
 
 ### 2. Configure the private webhook
 
@@ -84,7 +84,7 @@ The WebTransport endpoint is:
 https://bridge.example.com:4433/webtransport
 ```
 
-Expose or forward **UDP port 4433**. A UDP tunnel must forward to the gateway's published UDP port. The browser connects directly to this endpoint, independently of where the frontend is hosted.
+Clients must be able to reach **UDP port 4433** at the advertised endpoint. Any port forwarding must preserve UDP traffic. Clients connect directly to the gateway, independently of where the frontend is hosted.
 
 This endpoint requires a WebTransport client. It cannot be used as a regular HTTPS file URL in an address bar, an `<img>` source, or an unmodified HTTP client.
 
@@ -193,7 +193,7 @@ Open a session at `/webtransport`, then create a bidirectional stream for each H
 
 ```http
 GET /public/photo.jpg HTTP/1.1
-Host: nas.internal
+Host: backend.example.com
 Proxy-Authorization: Bearer your-gateway-token
 Authorization: Bearer your-backend-token
 Range: bytes=0-65535
