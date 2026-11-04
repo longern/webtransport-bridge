@@ -182,3 +182,22 @@ func TestHostIsOptionalAndExistingCertificatesAreReused(t *testing.T) {
 		t.Fatal("explicit hostname mismatch accepted")
 	}
 }
+
+func TestCertificateUsesMaximumWebTransportValidity(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	bundle, err := generate(DefaultHost, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := parse(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Measure the encoded X.509 timestamps, including the clock-skew backdate.
+	if got := certificate.Leaf.NotAfter.Sub(certificate.Leaf.NotBefore); got != 14*24*time.Hour {
+		t.Fatalf("certificate validity = %s; want exactly 14 days", got)
+	}
+	if !certificate.Leaf.NotBefore.Equal(now.Add(-time.Minute)) {
+		t.Fatal("clock-skew backdate changed")
+	}
+}

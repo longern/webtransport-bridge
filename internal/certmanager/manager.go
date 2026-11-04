@@ -31,7 +31,7 @@ import (
 // DefaultHost is a certificate label for clients authenticating with certificate hashes.
 const DefaultHost = "webtransport-bridge.invalid"
 
-const lifetime = 13 * 24 * time.Hour
+const lifetime = 14 * 24 * time.Hour
 const renewBefore = 48 * time.Hour
 
 type Options struct {

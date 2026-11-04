@@ -26,3 +26,12 @@ test('invalid payloads are rejected and storage failures never produce success',
   assert.equal((await worker.fetch(req('x'.repeat(8193)), env)).status, 413);
   await assert.rejects(worker.fetch(req(JSON.stringify(payload)), env), /storage failed/);
 });
+test('accepts the 14-day maximum and rejects certificates exceeding it', async () => {
+  const env = {WEBHOOK_SECRET: secret, PINS: {put: async () => {}}};
+  const data = structuredClone(payload);
+  data.certificates[0].notAfter = '2026-11-17T00:00:00Z';
+  const request = () => new Request(url, {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)});
+  assert.equal((await worker.fetch(request(), env)).status, 204);
+  data.certificates[0].notAfter = '2026-11-17T00:00:01Z';
+  assert.equal((await worker.fetch(request(), env)).status, 400);
+});

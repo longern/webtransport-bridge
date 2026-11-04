@@ -36,7 +36,7 @@ func main() {
 		log.Fatal(err)
 	}
 	now := time.Now().Add(-time.Minute)
-	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: *host}, NotBefore: now, NotAfter: now.Add(13 * 24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, BasicConstraintsValid: true}
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: *host}, NotBefore: now, NotAfter: now.Add(14 * 24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, BasicConstraintsValid: true}
 	if ip := net.ParseIP(*host); ip != nil {
 		template.IPAddresses = []net.IP{ip}
 	} else {
