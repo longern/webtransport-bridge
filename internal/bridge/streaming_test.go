@@ -338,3 +338,18 @@ func TestBackendResponseHeaderTimeoutReturns504(t *testing.T) {
 		t.Fatal("upstream connection was not closed")
 	}
 }
+
+func TestExchangeCleanupUnblocksPendingUploadRead(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	watch, _ := watchExchange(context.Background(), server, time.Hour, time.Hour, 0)
+	readDone := make(chan struct{})
+	go func() { var p [1]byte; _, _ = watch.Read(p[:]); close(readDone) }()
+	watch.stop()
+	select {
+	case <-readDone:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup left a blocked upload reader")
+	}
+}

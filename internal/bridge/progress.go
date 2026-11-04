@@ -93,7 +93,14 @@ func (w *exchangeWatch) headersDone() {
 	default:
 	}
 }
-func (w *exchangeWatch) stop() { close(w.done); w.cancel(); <-w.exited }
+func (w *exchangeWatch) stop() {
+	close(w.done)
+	w.cancel()
+	// An early backend response can leave Transport reading the request body.
+	// Unblock it even when the watchdog exits via done rather than ctx.Done().
+	_ = w.stream.SetDeadline(time.Now())
+	<-w.exited
+}
 func (w *exchangeWatch) Read(p []byte) (int, error) {
 	n, e := w.stream.Read(p)
 	if n > 0 {
