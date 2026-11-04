@@ -16,6 +16,7 @@ import (
 
 	"github.com/longern/webtransport-bridge/internal/bridge"
 	"github.com/longern/webtransport-bridge/internal/certmanager"
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
 )
@@ -29,7 +30,12 @@ func main() {
 	prefixes := flag.String("paths", "/", "comma separated permitted path prefixes")
 	methods := flag.String("methods", "GET,HEAD,POST,PUT", "permitted methods; add WebDAV methods explicitly")
 	public := flag.Bool("public", false, "explicitly allow requests without a Bearer token")
-	timeout := flag.Duration("timeout", 5*time.Minute, "total time per exchange")
+	timeout := flag.Duration("timeout", 0, "optional total exchange deadline; 0 disables it")
+	idleTimeout := flag.Duration("idle-timeout", time.Minute, "exchange timeout without request or response byte progress")
+	headerTimeout := flag.Duration("header-timeout", 15*time.Second, "absolute deadline for receiving request headers")
+	responseHeaderTimeout := flag.Duration("response-header-timeout", 30*time.Second, "backend response header deadline after uploading the request")
+	keepAlive := flag.Duration("keepalive", 15*time.Second, "QUIC keepalive interval; 0 disables it")
+	connectionIdle := flag.Duration("connection-idle-timeout", time.Minute, "QUIC connection idle timeout")
 	maxBody := flag.Int64("max-body", 1<<30, "maximum request body bytes")
 	maxHeaders := flag.Int("max-headers", 32<<10, "maximum HTTP header bytes")
 	maxStreams := flag.Int("max-streams", 32, "global concurrent HTTP exchanges")
@@ -47,7 +53,7 @@ func main() {
 	if token == "" && !*public {
 		log.Fatal("set BRIDGE_TOKEN or explicitly use -public")
 	}
-	if *origins == "" || *timeout <= 0 || *maxBody < 0 || *maxHeaders < 1024 || *maxStreams < 1 || *maxSessions < 1 {
+	if *origins == "" || *timeout < 0 || *idleTimeout <= 0 || *headerTimeout <= 0 || *responseHeaderTimeout <= 0 || *keepAlive < 0 || *connectionIdle <= 0 || *maxBody < 0 || *maxHeaders < 1024 || *maxStreams < 1 || *maxSessions < 1 {
 		log.Fatal("origins and positive limits are required")
 	}
 	allowed := map[string]bool{}
@@ -71,10 +77,10 @@ func main() {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil
 	tr.DisableCompression = true
-	tr.ResponseHeaderTimeout = 30 * time.Second
+	tr.ResponseHeaderTimeout = *responseHeaderTimeout
 	tr.MaxResponseHeaderBytes = int64(*maxHeaders)
 	defer tr.CloseIdleConnections()
-	b := &bridge.Bridge{Backend: u, Token: token, Prefixes: strings.Split(*prefixes, ","), Methods: mm, Transport: tr, Timeout: *timeout, MaxBodyBytes: *maxBody, MaxHeaderBytes: *maxHeaders}
+	b := &bridge.Bridge{Backend: u, Token: token, Prefixes: strings.Split(*prefixes, ","), Methods: mm, Transport: tr, Timeout: *timeout, IdleTimeout: *idleTimeout, HeaderTimeout: *headerTimeout, MaxBodyBytes: *maxBody, MaxHeaderBytes: *maxHeaders}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, NextProtos: []string{http3.NextProtoH3}}
@@ -87,7 +93,7 @@ func main() {
 		go manager.Run(ctx)
 	}
 	mux := http.NewServeMux()
-	s := &webtransport.Server{H3: &http3.Server{Addr: *addr, Handler: mux, TLSConfig: tlsConfig}, Config: &webtransport.Config{MaxIncomingStreams: int64(*maxStreams), MaxIncomingUniStreams: -1}, CheckOrigin: func(r *http.Request) bool { return allowed[r.Header.Get("Origin")] }}
+	s := &webtransport.Server{H3: &http3.Server{Addr: *addr, Handler: mux, TLSConfig: tlsConfig, QUICConfig: &quic.Config{KeepAlivePeriod: *keepAlive, MaxIdleTimeout: *connectionIdle}}, Config: &webtransport.Config{MaxIncomingStreams: int64(*maxStreams), MaxIncomingUniStreams: -1}, CheckOrigin: func(r *http.Request) bool { return allowed[r.Header.Get("Origin")] }}
 	slots := make(chan struct{}, *maxStreams)
 	sessions := make(chan struct{}, *maxSessions)
 	mux.HandleFunc("/webtransport", func(w http.ResponseWriter, r *http.Request) {

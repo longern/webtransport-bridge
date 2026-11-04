@@ -25,7 +25,9 @@ type Bridge struct {
 	Prefixes       []string
 	Methods        map[string]bool
 	Transport      http.RoundTripper
-	Timeout        time.Duration
+	Timeout        time.Duration // Optional total deadline; zero disables it.
+	IdleTimeout    time.Duration
+	HeaderTimeout  time.Duration
 	MaxHeaderBytes int
 	MaxBodyBytes   int64
 }
@@ -104,35 +106,53 @@ func reply(w io.Writer, code int, head bool) error {
 
 // Handle never buffers the complete upload or download. Caller owns stream closure.
 func (b *Bridge) Handle(ctx context.Context, s Stream) error {
-	ctx, cancel := context.WithTimeout(ctx, b.Timeout)
-	defer cancel()
-	_ = s.SetDeadline(time.Now().Add(b.Timeout))
-	req, err := http.ReadRequest(bufio.NewReader(&headerReader{r: s, limit: b.MaxHeaderBytes}))
-	if err != nil {
-		return reply(s, 400, false)
+	idle, header := b.IdleTimeout, b.HeaderTimeout
+	if idle == 0 {
+		idle = time.Minute
 	}
+	if header == 0 {
+		header = 15 * time.Second
+	}
+	watch, ctx := watchExchange(ctx, s, idle, header, b.Timeout)
+	var responseBody io.ReadCloser
+	defer func() {
+		watch.stop() // Cancel blocked upstream operations before closing their body.
+		if responseBody != nil {
+			_ = responseBody.Close()
+		}
+	}()
+	req, err := http.ReadRequest(bufio.NewReader(&headerReader{r: watch, limit: b.MaxHeaderBytes}))
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return reply(watch, 400, false)
+	}
+	watch.headersDone()
 	// Do not drain untrusted bodies on rejection. The stream owner stops receiving.
 	head := req.Method == "HEAD"
 	if req.ProtoMajor != 1 || req.ProtoMinor != 1 || !strings.HasPrefix(req.RequestURI, "/") || strings.HasPrefix(req.RequestURI, "//") || req.URL.IsAbs() {
-		return reply(s, 400, head)
+		return reply(watch, 400, head)
 	}
 	if b.Token != "" && subtle.ConstantTimeCompare([]byte(req.Header.Get("Authorization")), []byte("Bearer "+b.Token)) != 1 {
-		return reply(s, 401, head)
+		return reply(watch, 401, head)
 	}
 	if !b.Methods[req.Method] {
-		return reply(s, 405, head)
+		return reply(watch, 405, head)
 	}
 	// Multiple decoding by an upstream must not allow escaping the path scope.
 	if strings.Contains(req.URL.Path, "%") || !b.allowed(req.URL.Path) {
-		return reply(s, 403, head)
+		return reply(watch, 403, head)
 	}
 	if req.Header.Get("Expect") != "" || req.Header.Get("Upgrade") != "" {
-		return reply(s, 417, head)
+		return reply(watch, 417, head)
 	}
 	if req.ContentLength > b.MaxBodyBytes {
-		return reply(s, 413, head)
+		return reply(watch, 413, head)
 	}
-	req.Body = http.MaxBytesReader(nil, req.Body, b.MaxBodyBytes)
+	req.Body = http.MaxBytesReader(nil, io.NopCloser(req.Body), b.MaxBodyBytes)
+	// The stream owner stops receiving on return. Avoid http.ReadRequest's
+	// draining Close: a rejected or failed upload must not keep reading forever.
 	defer req.Body.Close()
 	req = req.WithContext(ctx)
 	req.RequestURI = ""
@@ -153,17 +173,21 @@ func (b *Bridge) Handle(ctx context.Context, s Stream) error {
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
 		var large *http.MaxBytesError
+		var timedOut interface{ Timeout() bool }
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		code := 502
 		if errors.As(err, &large) {
 			code = 413
-		} else if ctx.Err() != nil {
+		} else if errors.As(err, &timedOut) && timedOut.Timeout() {
 			code = 504
 		}
-		return reply(s, code, head)
+		return reply(watch, code, head)
 	}
-	defer resp.Body.Close()
+	responseBody = resp.Body
 	if resp.StatusCode == 101 {
-		return reply(s, 502, head)
+		return reply(watch, 502, head)
 	}
 	strip(resp.Header)
 	resp.Trailer = nil
@@ -171,5 +195,7 @@ func (b *Bridge) Handle(ctx context.Context, s Stream) error {
 	resp.ProtoMinor = 1
 	resp.Close = true
 	resp.Request = req
-	return resp.Write(s)
+	// Write directly to the stream: wrapping it in a buffered writer would
+	// delay small streaming responses such as SSE events.
+	return resp.Write(watch)
 }
