@@ -28,7 +28,7 @@ func main() {
 	key := flag.String("key", "/certs/key.pem", "TLS key PEM")
 	origins := flag.String("origins", "", "comma separated exact HTTPS page origins")
 	prefixes := flag.String("paths", "/", "comma separated permitted path prefixes")
-	methods := flag.String("methods", "GET,HEAD,POST,PUT", "permitted methods; add WebDAV methods explicitly")
+	methods := flag.String("methods", "GET,HEAD,POST,PUT", "permitted methods, or * for all supported methods")
 	public := flag.Bool("public", false, "disable gateway token checks and delegate authentication to the backend")
 	timeout := flag.Duration("timeout", 0, "optional total exchange deadline; 0 disables it")
 	idleTimeout := flag.Duration("idle-timeout", time.Minute, "exchange timeout without request or response byte progress")

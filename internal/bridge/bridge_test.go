@@ -53,6 +53,35 @@ func TestForwardRange(t *testing.T) {
 		t.Fatal(r, string(data))
 	}
 }
+func TestWildcardMethods(t *testing.T) {
+	for _, tc := range []struct {
+		method, path, auth, extra string
+		want                      int
+	}{
+		{"PROPFIND", "/public/", "Bearer secret", "", 204},
+		{"CUSTOM", "/public/", "Bearer secret", "", 204},
+		{"DELETE", "/public/", "", "", 407},
+		{"DELETE", "/private", "Bearer secret", "", 403},
+		{"GET", "/public/", "Bearer secret", "Upgrade: websocket\r\n", 417},
+		{"CONNECT", "/public/", "Bearer secret", "", 501},
+	} {
+		t.Run(tc.method+"/"+http.StatusText(tc.want), func(t *testing.T) {
+			b := fixture()
+			b.Methods = map[string]bool{"*": true}
+			b.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if tc.want != 204 || r.Method != tc.method {
+					t.Fatalf("unexpected forwarded method %q", r.Method)
+				}
+				return &http.Response{StatusCode: 204, Header: make(http.Header), Body: http.NoBody}, nil
+			})
+			r := exchange(t, b, tc.method+" "+tc.path+" HTTP/1.1\r\nHost: nas\r\nProxy-Authorization: "+tc.auth+"\r\n"+tc.extra+"\r\n")
+			if r.StatusCode != tc.want {
+				t.Fatalf("got %d, want %d", r.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
 func TestReject(t *testing.T) {
 	for _, tt := range []struct {
 		target, auth, extra string

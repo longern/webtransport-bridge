@@ -150,10 +150,13 @@ func (b *Bridge) Handle(ctx context.Context, s Stream) error {
 			return reply(watch, http.StatusProxyAuthRequired, head)
 		}
 	}
-	if !b.Methods[req.Method] {
+	if req.Method == http.MethodConnect {
+		return reply(watch, http.StatusNotImplemented, head)
+	}
+	if !b.Methods["*"] && !b.Methods[req.Method] {
 		methods := make([]string, 0, len(b.Methods))
 		for method, enabled := range b.Methods {
-			if enabled {
+			if enabled && method != http.MethodConnect {
 				methods = append(methods, method)
 			}
 		}

@@ -134,7 +134,7 @@ Run `bridge --help` for the command-line reference.
 | `--backend` | Required | Fixed HTTP(S) backend origin. |
 | `--origins` | Required | Comma-separated allowed HTTPS origins. |
 | `--paths` | `/` | Comma-separated allowed URL path prefixes. |
-| `--methods` | `GET,HEAD,POST,PUT` | Comma-separated allowed methods. |
+| `--methods` | `GET,HEAD,POST,PUT` | Comma-separated allowed methods, or `*` for all supported methods. |
 | `--auto-cert` | `false` | Enable certificate generation, rotation, and webhook publication. |
 | `--cert-host` | `webtransport-bridge.invalid` for new certificates | Optional certificate hostname or IP; existing certificates are reused when omitted. |
 | `--cert-dir` | `/certs` | Persistent directory for automatic certificate state. |
@@ -209,6 +209,8 @@ The gateway parses requests with Go's `http.ReadRequest`, forwards them using `h
 - Hop-by-hop headers are removed. Responses are not automatically decompressed, and redirects are returned without being followed.
 - Cookies, redirect locations, links, paths, and WebDAV `Destination` headers are not rewritten.
 - Response trailers, forwarded interim 1xx responses, `Expect: 100-continue`, protocol upgrades, and application datagrams are not supported.
+
+Use `'--methods=*'` in a shell to forward any HTTP method supported by the bridge, including WebDAV and custom methods. Authentication, path restrictions, and request limits still apply. Inner `CONNECT` requests and HTTP protocol upgrades are unsupported.
 
 Additional WebDAV methods can be enabled explicitly, for example:
 
