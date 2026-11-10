@@ -93,7 +93,16 @@ func main() {
 		go manager.Run(ctx)
 	}
 	mux := http.NewServeMux()
-	s := &webtransport.Server{H3: &http3.Server{Addr: *addr, Handler: mux, TLSConfig: tlsConfig, QUICConfig: &quic.Config{KeepAlivePeriod: *keepAlive, MaxIdleTimeout: *connectionIdle}}, Config: &webtransport.Config{MaxIncomingStreams: int64(*maxStreams), MaxIncomingUniStreams: -1}, CheckOrigin: func(r *http.Request) bool { return allowed[r.Header.Get("Origin")] }}
+	s := &webtransport.Server{
+		H3: &http3.Server{Addr: *addr, Handler: mux, TLSConfig: tlsConfig, QUICConfig: &quic.Config{KeepAlivePeriod: *keepAlive, MaxIdleTimeout: *connectionIdle}},
+		Config: &webtransport.Config{
+			MaxIncomingStreams:    int64(*maxStreams),
+			MaxIncomingUniStreams: -1,
+			// Safari needs receive credit before it can send the first request.
+			MaxIncomingData: 1 << 20,
+		},
+		CheckOrigin: func(r *http.Request) bool { return allowed[r.Header.Get("Origin")] },
+	}
 	slots := make(chan struct{}, *maxStreams)
 	sessions := make(chan struct{}, *maxSessions)
 	mux.HandleFunc("/webtransport", func(w http.ResponseWriter, r *http.Request) {
