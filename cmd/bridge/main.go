@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -23,12 +21,13 @@ import (
 
 func main() {
 	addr := flag.String("listen", ":4433", "UDP listen address")
+	config := flag.String("config", "", "YAML file for routing WebTransport sessions to multiple backends")
 	backend := flag.String("backend", "", "fixed backend origin, e.g. http://caddy:80")
 	cert := flag.String("cert", "/certs/cert.pem", "TLS certificate PEM")
 	key := flag.String("key", "/certs/key.pem", "TLS key PEM")
 	origins := flag.String("origins", "", "comma separated exact HTTPS page origins")
 	prefixes := flag.String("paths", "/", "comma separated permitted path prefixes")
-	methods := flag.String("methods", "GET,HEAD,POST,PUT", "permitted methods, or * for all supported methods")
+	methods := flag.String("methods", defaultMethods, "permitted methods, or * for all supported methods")
 	public := flag.Bool("public", false, "disable gateway token checks and delegate authentication to the backend")
 	timeout := flag.Duration("timeout", 0, "optional total exchange deadline; 0 disables it")
 	idleTimeout := flag.Duration("idle-timeout", time.Minute, "exchange timeout without request or response byte progress")
@@ -48,35 +47,9 @@ func main() {
 	certDir := flag.String("cert-dir", "/certs", "persistent directory for automatic certificate state")
 	publishDelay := flag.Duration("cert-publish-delay", time.Hour, "delay between webhook confirmation and certificate activation")
 	flag.Parse()
-	u, e := url.Parse(*backend)
-	if e != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		log.Fatal("-backend must be an HTTP(S) origin without credentials, path or query")
-	}
-	token, err := configuredToken(os.Getenv("BRIDGE_TOKEN"), *public)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if *origins == "" || *timeout < 0 || *idleTimeout <= 0 || *headerTimeout <= 0 || *responseHeaderTimeout <= 0 || *keepAlive < 0 || *connectionIdle <= 0 || *sessionIdle <= 0 ||
+	if *timeout < 0 || *idleTimeout <= 0 || *headerTimeout <= 0 || *responseHeaderTimeout <= 0 || *keepAlive < 0 || *connectionIdle <= 0 || *sessionIdle <= 0 ||
 		*maxBody < 0 || *maxHeaders < 1024 || *maxStreams < 1 || *maxSessions < 1 || *maxStreamsPerIP < 1 || *maxSessionsPerIP < 1 {
-		log.Fatal("origins and positive limits are required")
-	}
-	allowed := map[string]bool{}
-	for _, o := range strings.Split(*origins, ",") {
-		o = strings.TrimSpace(o)
-		v, err := url.Parse(o)
-		if err != nil || v.Scheme != "https" || v.Host == "" || v.Path != "" || v.RawQuery != "" || v.Fragment != "" || v.User != nil {
-			log.Fatal("origins must be exact HTTPS origins without trailing slash")
-		}
-		allowed[o] = true
-	}
-	mm := map[string]bool{}
-	for _, m := range strings.Split(*methods, ",") {
-		mm[strings.TrimSpace(m)] = true
-	}
-	for _, p := range strings.Split(*prefixes, ",") {
-		if !strings.HasPrefix(p, "/") {
-			log.Fatal("path prefixes must start with /")
-		}
+		log.Fatal("invalid timeouts or limits")
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil
@@ -84,7 +57,26 @@ func main() {
 	tr.ResponseHeaderTimeout = *responseHeaderTimeout
 	tr.MaxResponseHeaderBytes = int64(*maxHeaders)
 	defer tr.CloseIdleConnections()
-	b := &bridge.Bridge{Backend: u, Token: token, Prefixes: strings.Split(*prefixes, ","), Methods: mm, Transport: tr, Timeout: *timeout, IdleTimeout: *idleTimeout, HeaderTimeout: *headerTimeout, MaxBodyBytes: *maxBody, MaxHeaderBytes: *maxHeaders}
+	base := bridge.Bridge{
+		Transport: tr, Timeout: *timeout, IdleTimeout: *idleTimeout,
+		HeaderTimeout: *headerTimeout, MaxBodyBytes: *maxBody, MaxHeaderBytes: *maxHeaders,
+	}
+	var routes sessionRoutes
+	var err error
+	if *config != "" {
+		flag.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "backend", "origins", "paths", "methods", "public":
+				log.Fatalf("--%s cannot be combined with --config", f.Name)
+			}
+		})
+		routes, err = readRoutes(*config, base)
+	} else {
+		routes, err = legacyRoutes(base, *backend, *origins, *prefixes, *methods, os.Getenv(defaultTokenEnv), *public)
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, NextProtos: []string{http3.NextProtoH3}}
@@ -96,22 +88,22 @@ func main() {
 		tlsConfig.GetCertificate = manager.GetCertificate
 		go manager.Run(ctx)
 	}
-	mux := http.NewServeMux()
+	handler := &sessionHandler{
+		routes: routes, idleTimeout: *sessionIdle,
+		sessions:  newConcurrencyLimit(*maxSessions, *maxSessionsPerIP),
+		exchanges: newConcurrencyLimit(*maxStreams, *maxStreamsPerIP),
+	}
 	s := &webtransport.Server{
-		H3: &http3.Server{Addr: *addr, Handler: mux, TLSConfig: tlsConfig, QUICConfig: &quic.Config{KeepAlivePeriod: *keepAlive, MaxIdleTimeout: *connectionIdle}},
+		H3: &http3.Server{Addr: *addr, Handler: handler, TLSConfig: tlsConfig, QUICConfig: &quic.Config{KeepAlivePeriod: *keepAlive, MaxIdleTimeout: *connectionIdle}},
 		Config: &webtransport.Config{
 			MaxIncomingStreams:    int64(*maxStreams),
 			MaxIncomingUniStreams: -1,
 			// Safari needs receive credit before it can send the first request.
 			MaxIncomingData: 1 << 20,
 		},
-		CheckOrigin: func(r *http.Request) bool { return allowed[r.Header.Get("Origin")] },
+		CheckOrigin: routes.checkOrigin,
 	}
-	mux.Handle("/webtransport", &sessionHandler{
-		server: s, bridge: b, idleTimeout: *sessionIdle,
-		sessions:  newConcurrencyLimit(*maxSessions, *maxSessionsPerIP),
-		exchanges: newConcurrencyLimit(*maxStreams, *maxStreamsPerIP),
-	})
+	handler.server = s
 	go func() { <-ctx.Done(); _ = s.Close() }()
 	fmt.Printf("WebTransport HTTP bridge listening on UDP %s\n", *addr)
 	var serveErr error

@@ -7,20 +7,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/longern/webtransport-bridge/internal/bridge"
 	"github.com/quic-go/webtransport-go"
 )
 
 type sessionHandler struct {
 	server      *webtransport.Server
-	bridge      *bridge.Bridge
+	routes      sessionRoutes
 	idleTimeout time.Duration
 	sessions    *concurrencyLimit
 	exchanges   *concurrencyLimit
 }
 
 func (h *sessionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/webtransport" || r.URL.RawQuery != "" {
+	origins := h.routes.originsFor(r)
+	if origins == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -29,7 +29,8 @@ func (h *sessionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "expected WebTransport CONNECT", http.StatusMethodNotAllowed)
 		return
 	}
-	if !h.server.CheckOrigin(r) {
+	backend := origins.backendFor(r)
+	if backend == nil {
 		http.Error(w, "origin not allowed", http.StatusForbidden)
 		return
 	}
@@ -73,7 +74,7 @@ func (h *sessionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			defer releaseExchange()
 			defer stream.CancelRead(0)
 			defer stream.Close()
-			if err := h.bridge.Handle(stream.Context(), stream); err != nil {
+			if err := backend.Handle(stream.Context(), stream); err != nil {
 				stream.CancelWrite(1)
 				log.Printf("exchange failed: %v", err)
 			}

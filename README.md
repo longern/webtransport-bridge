@@ -15,7 +15,7 @@ Use it with HTTP APIs, application servers, file servers, or other HTTP backends
 - Forward standard HTTP headers, including Range requests and cache validators.
 - Generate and rotate short-lived certificates automatically, with private webhook delivery of pins.
 - Optionally authenticate access to the gateway using standard proxy authentication while preserving backend credentials.
-- Restrict requests to a fixed backend, allowed origins, methods, and path prefixes.
+- Route WebTransport sessions to configured backends and restrict their origins, methods, and path prefixes.
 - Configure request deadlines, upload limits, and concurrency limits.
 - Deploy using Docker images for `linux/amd64` and `linux/arm64`.
 
@@ -131,8 +131,9 @@ Run `bridge --help` for the command-line reference.
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--listen` | `:4433` | UDP listen address. |
-| `--backend` | Required | Fixed HTTP(S) backend origin. |
-| `--origins` | Required | Comma-separated allowed HTTPS origins. |
+| `--config` | Unset | YAML file for routing sessions to multiple backends. |
+| `--backend` | Required without `--config` | Fixed HTTP(S) backend origin. |
+| `--origins` | Required without `--config` | Comma-separated allowed HTTPS origins. |
 | `--paths` | `/` | Comma-separated allowed URL path prefixes. |
 | `--methods` | `GET,HEAD,POST,PUT` | Comma-separated allowed methods, or `*` for all supported methods. |
 | `--auto-cert` | `false` | Enable certificate generation, rotation, and webhook publication. |
@@ -155,6 +156,16 @@ Run `bridge --help` for the command-line reference.
 | `--max-streams-per-ip` | `16` | Maximum active HTTP exchanges across sessions from one IPv4 address or IPv6 /64. |
 | `--max-sessions-per-ip` | `16` | Maximum active WebTransport sessions from one IPv4 address or IPv6 /64. |
 | `--public` | `false` | Disable gateway token checks and delegate authentication to the backend; any BRIDGE_TOKEN value is ignored. |
+
+### Multiple backends
+
+Mount a [route configuration](examples/bridge.routes.yaml) and start the bridge with `--config=/etc/bridge/routes.yaml`. In Compose, add a read-only volume such as `./bridge.routes.yaml:/etc/bridge/routes.yaml:ro`, and replace `--backend`, `--origins`, `--paths`, `--methods`, and `--public` with `--config=/etc/bridge/routes.yaml`. Keep the listener, certificate, timeout, and limit settings on the command line. The example reads the protected route's token from `FILES_BRIDGE_TOKEN` in the container environment.
+
+The file follows the `rules`, `matches`, and `backendRefs` structure of [Gateway API HTTPRoute](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/). In version 1, each match requires an exact CONNECT path and one exact `Origin` header condition. A match requires both conditions, and a rule can list several alternatives. Rules may share a CONNECT path if their origins differ. Unknown fields, duplicate path and origin pairs, and undefined backends fail at startup. An unconfigured path returns `404`, and a missing, duplicate, or disallowed `Origin` on a configured path returns `403`. Use HTTPS origins as sent by the browser, without a trailing slash. The CONNECT URL takes no query parameters.
+
+Each rule uses one `backendRefs` name, resolved to an HTTP(S) origin in the top-level `backends` map. The Bridge fixes that backend and the rule's `streamPolicy` for the session. The stream request's `Host`, `Origin`, and target path cannot select a different route. `streamPolicy.allowedPaths` and `allowedMethods` govern the HTTP requests inside that session. Their defaults are `[/]` and `[GET, HEAD, POST, PUT]`. Use `allowedMethods: ['*']` to allow all supported methods. Configure `streamPolicy.public: true` to delegate authentication to the backend, or use `streamPolicy.tokenEnv` to read a gateway bearer token from a named environment variable. Protected routes default to `BRIDGE_TOKEN` and require a nonempty token at startup. `Origin` is a browser access check. The gateway token or the backend must authenticate clients where required.
+
+Set each frontend's WebTransport URL to its configured CONNECT path, for example `https://bridge.example.com:4433/webtransport/photos`. The listener's certificate, rotation, and admission limits are shared across routes. If several LanternDock Workers use certificate pins, they can read the same `KV` namespace for this bridge's pins. The bridge still publishes to the single configured `CERT_WEBHOOK_URL`.
 
 ### Authentication
 
@@ -194,7 +205,7 @@ If an existing deployment explicitly sets `--timeout=5m`, remove it or set `--ti
 
 ## Wire protocol
 
-Open a session at `/webtransport`, then create a bidirectional stream for each HTTP exchange. Requests use HTTP/1.1 origin-form with CRLF line endings and an empty line after the headers:
+Open a session at `/webtransport` in single-backend mode, or at the configured CONNECT path in routed mode. Then create a bidirectional stream for each HTTP exchange. Requests use HTTP/1.1 origin-form with CRLF line endings and an empty line after the headers:
 
 ```http
 GET /public/photo.jpg HTTP/1.1

@@ -1,0 +1,35 @@
+version: 1
+backends:
+  photos: http://photos-nas:8080
+  files: http://files-nas:8080
+
+rules:
+  - matches:
+      - path:
+          type: Exact
+          value: /webtransport/photos
+        headers:
+          - type: Exact
+            name: Origin
+            value: https://photos.example.com
+    backendRefs:
+      - name: photos
+    streamPolicy:
+      public: true
+      allowedPaths: [/dav, /api]
+      allowedMethods: [GET, HEAD, OPTIONS, PROPFIND, SEARCH]
+
+  - matches:
+      - path:
+          type: Exact
+          value: /webtransport/files
+        headers:
+          - type: Exact
+            name: Origin
+            value: https://files.example.com
+    backendRefs:
+      - name: files
+    streamPolicy:
+      tokenEnv: FILES_BRIDGE_TOKEN
+      allowedPaths: [/dav, /api]
+      allowedMethods: ['*']

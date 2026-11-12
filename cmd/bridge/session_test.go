@@ -10,7 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,6 +127,21 @@ func TestWebTransportExchangeAdmissionAndActiveSession(t *testing.T) {
 
 func startSessionTestServer(t *testing.T, idle time.Duration, handler http.HandlerFunc) (*webtransport.Transport, string, string) {
 	t.Helper()
+	backend := httptest.NewTLSServer(handler)
+	t.Cleanup(backend.Close)
+	base := bridge.Bridge{
+		Transport: backend.Client().Transport, MaxHeaderBytes: 32768, IdleTimeout: 5 * time.Second,
+	}
+	routes, err := legacyRoutes(base, backend.URL, testOrigin, "/", "GET", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, ipv4, ipv6 := startRoutedSessionTestServer(t, idle, backend, routes)
+	return client, ipv4 + defaultSessionPath, ipv6 + defaultSessionPath
+}
+
+func startRoutedSessionTestServer(t *testing.T, idle time.Duration, tlsSource *httptest.Server, routes sessionRoutes) (*webtransport.Transport, string, string) {
+	t.Helper()
 	ipv4, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -137,50 +152,36 @@ func startSessionTestServer(t *testing.T, idle time.Duration, handler http.Handl
 		t.Skipf("IPv6 loopback unavailable: %v", err)
 	}
 	t.Cleanup(func() { _ = ipv6.Close() })
-	backend := httptest.NewTLSServer(handler)
-	t.Cleanup(backend.Close)
-	backendURL, err := url.Parse(backend.URL)
-	if err != nil {
-		t.Fatal(err)
+	handler := &sessionHandler{
+		routes: routes, idleTimeout: idle,
+		sessions:  newConcurrencyLimit(3, 2),
+		exchanges: newConcurrencyLimit(3, 2),
 	}
-	mux := http.NewServeMux()
 	server := &webtransport.Server{
 		H3: &http3.Server{
-			Handler: mux,
+			Handler: handler,
 			TLSConfig: &tls.Config{
-				Certificates: backend.TLS.Certificates,
+				Certificates: tlsSource.TLS.Certificates,
 				NextProtos:   []string{http3.NextProtoH3},
 			},
 			QUICConfig: &quic.Config{KeepAlivePeriod: 25 * time.Millisecond, MaxIdleTimeout: 10 * time.Second},
 		},
-		CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == testOrigin },
+		CheckOrigin: routes.checkOrigin,
 	}
-	mux.Handle("/webtransport", &sessionHandler{
-		server:      server,
-		idleTimeout: idle,
-		sessions:    newConcurrencyLimit(3, 2),
-		exchanges:   newConcurrencyLimit(3, 2),
-		bridge: &bridge.Bridge{
-			Backend: backendURL, Prefixes: []string{"/"},
-			Methods: map[string]bool{"GET": true}, Transport: backend.Client().Transport,
-			MaxHeaderBytes: 32768, IdleTimeout: 5 * time.Second,
-		},
-	})
+	handler.server = server
 	for _, listener := range []net.PacketConn{ipv4, ipv6} {
 		go func() { _ = server.Serve(listener) }()
 	}
 	t.Cleanup(func() { _ = server.Close() })
-	tlsConfig := backend.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	tlsConfig := tlsSource.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
 	tlsConfig.ServerName = "127.0.0.1"
 	client := &webtransport.Transport{TLSClientConfig: tlsConfig}
 	t.Cleanup(func() { _ = client.Close() })
-	return client, "https://" + ipv4.LocalAddr().String() + "/webtransport", "https://" + ipv6.LocalAddr().String() + "/webtransport"
+	return client, "https://" + ipv4.LocalAddr().String(), "https://" + ipv6.LocalAddr().String()
 }
 
 func dialSession(t *testing.T, client *webtransport.Transport, endpoint string, want int) *webtransport.Session {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-	defer cancel()
 	headers := http.Header{
 		"Origin":          {testOrigin},
 		"X-Forwarded-For": {"192.0.2.1"},
@@ -188,6 +189,13 @@ func dialSession(t *testing.T, client *webtransport.Transport, endpoint string, 
 	if want == http.StatusTooManyRequests {
 		headers.Set("X-Forwarded-For", "192.0.2.2")
 	}
+	return dialSessionWithHeaders(t, client, endpoint, headers, want)
+}
+
+func dialSessionWithHeaders(t *testing.T, client *webtransport.Transport, endpoint string, headers http.Header, want int) *webtransport.Session {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
 	response, session, err := client.Dial(ctx, endpoint, headers)
 	if response == nil || response.StatusCode != want {
 		t.Fatalf("CONNECT %s = %v, %v; want %d", endpoint, response, err, want)
@@ -205,6 +213,11 @@ func dialSession(t *testing.T, client *webtransport.Transport, endpoint string, 
 
 func openExchange(t *testing.T, session *webtransport.Session, path string) *webtransport.Stream {
 	t.Helper()
+	return openRawExchange(t, session, fmt.Sprintf("GET %s HTTP/1.1\r\nHost: test\r\n\r\n", path))
+}
+
+func openRawExchange(t *testing.T, session *webtransport.Session, request string) *webtransport.Stream {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	stream, err := session.OpenStreamSync(ctx)
@@ -212,7 +225,7 @@ func openExchange(t *testing.T, session *webtransport.Session, path string) *web
 		t.Fatal(err)
 	}
 	_ = stream.SetDeadline(time.Now().Add(4 * time.Second))
-	if _, err = fmt.Fprintf(stream, "GET %s HTTP/1.1\r\nHost: test\r\n\r\n", path); err != nil {
+	if _, err = io.WriteString(stream, request); err != nil {
 		t.Fatal(err)
 	}
 	if err = stream.Close(); err != nil {
@@ -223,15 +236,88 @@ func openExchange(t *testing.T, session *webtransport.Session, path string) *web
 
 func checkResponse(t *testing.T, stream *webtransport.Stream, want string) {
 	t.Helper()
+	checkExchange(t, stream, http.StatusOK, want)
+}
+
+func checkExchange(t *testing.T, stream *webtransport.Stream, status int, want string) {
+	t.Helper()
 	response, err := http.ReadResponse(bufio.NewReader(stream), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(response.Body)
-	if response.StatusCode != http.StatusOK || string(body) != want || err != nil {
+	if response.StatusCode != status || string(body) != want || err != nil {
 		t.Fatalf("exchange = %d, %q, %v", response.StatusCode, body, err)
 	}
+}
+
+func TestWebTransportRoutesKeepSessionBackendAndPolicy(t *testing.T) {
+	photos := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "photos:"+r.URL.RequestURI())
+	}))
+	t.Cleanup(photos.Close)
+	files := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Proxy-Authorization") != "" {
+			t.Error("gateway token reached the backend")
+		}
+		fmt.Fprint(w, "files:"+r.URL.RequestURI())
+	}))
+	t.Cleanup(files.Close)
+	config := fmt.Sprintf(`version: 1
+backends:
+  photos: %q
+  files: %q
+rules:
+  - matches:
+      - path: { type: Exact, value: /webtransport/photos }
+        headers: [{ type: Exact, name: Origin, value: https://photos.example }]
+      - path: { type: Exact, value: /webtransport/shared }
+        headers: [{ type: Exact, name: origin, value: https://photos.example }]
+    backendRefs: [{ name: photos }]
+    streamPolicy:
+      public: true
+      allowedPaths: [/dav]
+      allowedMethods: [GET]
+  - matches:
+      - path: { type: Exact, value: /webtransport/shared }
+        headers: [{ type: Exact, name: Origin, value: https://files.example }]
+    backendRefs: [{ name: files }]
+    streamPolicy:
+      tokenEnv: FILES_TOKEN
+      allowedPaths: [/api]
+      allowedMethods: [GET]
+`, photos.URL, files.URL)
+	base := bridge.Bridge{Transport: photos.Client().Transport, MaxHeaderBytes: 32768}
+	routes, err := decodeRoutes(strings.NewReader(config), base, func(name string) string {
+		if name == "FILES_TOKEN" {
+			return "files-secret"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, endpoint, _ := startRoutedSessionTestServer(t, 5*time.Second, photos, routes)
+	photoOrigin := http.Header{"Origin": {"https://photos.example"}}
+	fileOrigin := http.Header{"Origin": {"https://files.example"}}
+	dialSessionWithHeaders(t, client, endpoint+"/webtransport/photos", fileOrigin, http.StatusForbidden)
+	dialSessionWithHeaders(t, client, endpoint+"/webtransport/shared", http.Header{}, http.StatusForbidden)
+	dialSessionWithHeaders(t, client, endpoint+"/webtransport/shared", http.Header{
+		"Origin": {"https://photos.example", "https://files.example"},
+	}, http.StatusForbidden)
+	for _, path := range []string{"/webtransport", "/webtransport/photos/extra", "/webtransport/%70hotos", "/webtransport/photos?route=files"} {
+		dialSessionWithHeaders(t, client, endpoint+path, photoOrigin, http.StatusNotFound)
+	}
+	photoSession := dialSessionWithHeaders(t, client, endpoint+"/webtransport/shared", photoOrigin, http.StatusOK)
+	fileSession := dialSessionWithHeaders(t, client, endpoint+"/webtransport/shared", fileOrigin, http.StatusOK)
+	checkResponse(t, openExchange(t, photoSession, "/dav/example.jpg?download=1"), "photos:/dav/example.jpg?download=1")
+	checkExchange(t, openExchange(t, photoSession, "/api/files"), http.StatusForbidden, "Forbidden\n")
+	checkExchange(t, openRawExchange(t, photoSession, "POST /dav/example.jpg HTTP/1.1\r\nHost: test\r\n\r\n"), http.StatusMethodNotAllowed, "Method Not Allowed\n")
+	checkExchange(t, openExchange(t, fileSession, "/api/files"), http.StatusProxyAuthRequired, "Proxy Authentication Required\n")
+	// Inner Host and Origin cannot switch the already admitted session's backend.
+	checkResponse(t, openRawExchange(t, fileSession, "GET /api/files HTTP/1.1\r\nHost: photos.example\r\nOrigin: https://photos.example\r\nProxy-Authorization: Bearer files-secret\r\n\r\n"), "files:/api/files")
+	checkResponse(t, openExchange(t, photoSession, "/dav/second.jpg"), "photos:/dav/second.jpg")
 }
 
 func waitForIdleClose(t *testing.T, session *webtransport.Session) {
