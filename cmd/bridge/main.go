@@ -36,10 +36,13 @@ func main() {
 	responseHeaderTimeout := flag.Duration("response-header-timeout", 30*time.Second, "backend response header deadline after uploading the request")
 	keepAlive := flag.Duration("keepalive", 15*time.Second, "QUIC keepalive interval; 0 disables it")
 	connectionIdle := flag.Duration("connection-idle-timeout", time.Minute, "QUIC connection idle timeout")
+	sessionIdle := flag.Duration("session-idle-timeout", time.Minute, "close a WebTransport session after this long without an active exchange")
 	maxBody := flag.Int64("max-body", 1<<30, "maximum request body bytes")
 	maxHeaders := flag.Int("max-headers", 32<<10, "maximum HTTP header bytes")
 	maxStreams := flag.Int("max-streams", 32, "global concurrent HTTP exchanges")
 	maxSessions := flag.Int("max-sessions", 128, "maximum active sessions")
+	maxStreamsPerIP := flag.Int("max-streams-per-ip", 16, "concurrent HTTP exchanges per IPv4 address or IPv6 /64")
+	maxSessionsPerIP := flag.Int("max-sessions-per-ip", 16, "active sessions per IPv4 address or IPv6 /64")
 	autoCert := flag.Bool("auto-cert", false, "automatically generate and rotate certificates; requires CERT_WEBHOOK_URL")
 	certHost := flag.String("cert-host", "", "optional hostname or IP for automatic certificates (default label: webtransport-bridge.invalid)")
 	certDir := flag.String("cert-dir", "/certs", "persistent directory for automatic certificate state")
@@ -53,7 +56,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if *origins == "" || *timeout < 0 || *idleTimeout <= 0 || *headerTimeout <= 0 || *responseHeaderTimeout <= 0 || *keepAlive < 0 || *connectionIdle <= 0 || *maxBody < 0 || *maxHeaders < 1024 || *maxStreams < 1 || *maxSessions < 1 {
+	if *origins == "" || *timeout < 0 || *idleTimeout <= 0 || *headerTimeout <= 0 || *responseHeaderTimeout <= 0 || *keepAlive < 0 || *connectionIdle <= 0 || *sessionIdle <= 0 ||
+		*maxBody < 0 || *maxHeaders < 1024 || *maxStreams < 1 || *maxSessions < 1 || *maxStreamsPerIP < 1 || *maxSessionsPerIP < 1 {
 		log.Fatal("origins and positive limits are required")
 	}
 	allowed := map[string]bool{}
@@ -103,46 +107,10 @@ func main() {
 		},
 		CheckOrigin: func(r *http.Request) bool { return allowed[r.Header.Get("Origin")] },
 	}
-	slots := make(chan struct{}, *maxStreams)
-	sessions := make(chan struct{}, *maxSessions)
-	mux.HandleFunc("/webtransport", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/webtransport" || r.URL.RawQuery != "" {
-			http.NotFound(w, r)
-			return
-		}
-		select {
-		case sessions <- struct{}{}:
-			defer func() { <-sessions }()
-		default:
-			http.Error(w, "session limit", 503)
-			return
-		}
-		session, err := s.Upgrade(w, r)
-		if err != nil {
-			return
-		}
-		defer session.CloseWithError(0, "")
-		for {
-			stream, err := session.AcceptStream(session.Context())
-			if err != nil {
-				return
-			}
-			select {
-			case slots <- struct{}{}:
-				go func() {
-					defer func() { <-slots }()
-					defer stream.CancelRead(0)
-					defer stream.Close()
-					if err := b.Handle(stream.Context(), stream); err != nil {
-						stream.CancelWrite(1)
-						log.Printf("exchange failed: %v", err)
-					}
-				}()
-			default:
-				stream.CancelRead(1)
-				stream.CancelWrite(1)
-			}
-		}
+	mux.Handle("/webtransport", &sessionHandler{
+		server: s, bridge: b, idleTimeout: *sessionIdle,
+		sessions:  newConcurrencyLimit(*maxSessions, *maxSessionsPerIP),
+		exchanges: newConcurrencyLimit(*maxStreams, *maxStreamsPerIP),
 	})
 	go func() { <-ctx.Done(); _ = s.Close() }()
 	fmt.Printf("WebTransport HTTP bridge listening on UDP %s\n", *addr)

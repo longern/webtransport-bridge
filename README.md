@@ -147,10 +147,13 @@ Run `bridge --help` for the command-line reference.
 | `--response-header-timeout` | `30s` | Backend response header deadline after the request upload completes. |
 | `--keepalive` | `15s` | QUIC keepalive interval; `0` disables it. |
 | `--connection-idle-timeout` | `1m` | QUIC connection idle timeout, negotiated with the peer. |
+| `--session-idle-timeout` | `1m` | Close a WebTransport session after this long without an active HTTP exchange. |
 | `--max-headers` | `32768` | Maximum request or backend response header size in bytes. |
 | `--max-body` | `1073741824` | Maximum upload size in bytes; does not limit downloads. |
 | `--max-streams` | `32` | Maximum active HTTP exchanges across all sessions. |
 | `--max-sessions` | `128` | Maximum active WebTransport sessions. |
+| `--max-streams-per-ip` | `16` | Maximum active HTTP exchanges across sessions from one IPv4 address or IPv6 /64. |
+| `--max-sessions-per-ip` | `16` | Maximum active WebTransport sessions from one IPv4 address or IPv6 /64. |
 | `--public` | `false` | Disable gateway token checks and delegate authentication to the backend; any BRIDGE_TOKEN value is ignored. |
 
 ### Authentication
@@ -170,13 +173,15 @@ The gateway consumes `Proxy-Authorization` and never forwards it, including in p
 
 For public file access, use a dedicated read-only backend and restrict methods to `GET,HEAD`.
 
+Session admission returns HTTP `429` when the source is at its limit and `503` when the server is at its global limit. An exchange over either stream limit is reset. Limits use the QUIC peer address. Clients behind the same NAT or a source-NAT UDP relay share the same allowance, so size the per-source limits for the expected concurrency there. A client-supplied forwarding header cannot change its allowance.
+
 ## Large files and streaming responses
 
 Uploads and downloads stream through the gateway without buffering whole files. There is no default total exchange deadline: an active transfer can run longer than five minutes. Downloads have no size cap; uploads retain the configurable 1 GiB default limit.
 
 An exchange is cancelled if no request or response bytes make progress for one minute. This covers stalled uploads, backend responses, and clients that stop consuming a response. Client cancellation also cancels the backend request and interrupts blocked stream I/O. A separate 15-second absolute request-header deadline prevents a trickle of header bytes from extending setup indefinitely. Backend response headers have their own 30-second timeout after upload; the idle timeout also applies while waiting.
 
-Responses are serialized directly to the stream without an additional buffered writer. SSE headers and events can reach clients before the backend closes its response. The backend must flush its events and send an event or heartbeat before the exchange idle timeout, or you must increase that timeout. QUIC keepalive packets preserve the connection but do not count as HTTP exchange activity. Peer timeouts and network failures can still close connections; clients must handle reconnection.
+Responses are serialized directly to the stream without an additional buffered writer. SSE headers and events can reach clients before the backend closes its response. The backend must flush its events and send an event or heartbeat before the exchange idle timeout, or you must increase that timeout. The session idle timer starts at admission and restarts after its last active exchange ends. QUIC keepalive packets do not reset that timer. Clients should open a new WebTransport session on their next request after a session closes.
 
 For example, append these arguments to Compose's `command` for uploads up to 100 GiB and up to five minutes between application bytes:
 
